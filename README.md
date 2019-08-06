@@ -1,9 +1,9 @@
 # MANO method for ABCD system
 This repository contains all the code and data to regenerate results from our paper:
-"High-throughput functional evaluation method for variants of unknown significance in BRCA2"
+"High-Throughput Functional Evaluation of BRCA2 Variants of Unknown Significance"
 
 # Supplementary Code
-> M. Ikegami et al., "High-throughput functional evaluation method for variants of unknown significance in BRCA2", in submission. 
+> M. Ikegami et al., "High-Throughput Functional Evaluation of BRCA2 Variants of Unknown Significance", in submission. 
 
 ## Contents
 
@@ -18,9 +18,9 @@ We developed a high-throughput functional assay based on the mixed-all-nominated
 
 # Repo Contents
 
-- [summary](./R): summary pdf file and `R` markdown code.
+- [summary](./summary): summary pdf file and `R` markdown code.
 - [sources](./sources): data sources for reproducing the figures.
-- [figures](./man): `R` source codes and output figures.
+- [output](./output): output figures and tables.
 
 # System Requirements
 
@@ -76,7 +76,7 @@ Please put all the files in the same directory, and set the working directory ap
 
 # Reproducibility
 
-All the code and data are available in MANO-summary.Rmd and `sourcess` directory to reproduce figures and tables in our paper. Each Bayesian interference takes about 10-20 minutes on a recommended machine.
+All the code and data are available in MANO-summary.Rmd and `sources` directory to reproduce figures and tables in our paper. Each Bayesian inference takes about 10-20 minutes on a recommended machine.
 
 MANO.pdf generated from MANO.Rmd includes all scripts with information.
 
@@ -87,7 +87,11 @@ MANO.pdf generated from MANO.Rmd includes all scripts with information.
 │   ├── MANO-summary.pdf
 │   └── MANO-summary.Rmd
 ├── sources
-      ├── read_summary.csv
+│     ├── read_summary.csv
+│     ├── data_HMC.csv
+│     └── RT-PCR.csv
+└── output
+      ├── read_summary.csv
       ├── data_HMC.csv
       └── RT-PCR.csv
 
