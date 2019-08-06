@@ -18,9 +18,9 @@ We developed a high-throughput functional assay based on the mixed-all-nominated
 
 # Repo Contents
 
-- [summary](./summary): summary pdf file and `R` markdown code.
+- [summary](./summary): summary pdf file including figures and `R` markdown code.
 - [sources](./sources): data sources for reproducing the figures.
-- [output](./output): output figures and tables.
+- [output](./output): output raw data tables.
 
 # System Requirements
 
@@ -91,9 +91,20 @@ MANO.pdf generated from MANO.Rmd includes all scripts with information.
 │     ├── data_HMC.csv
 │     └── RT-PCR.csv
 └── output
-      ├── read_summary.csv
-      ├── data_HMC.csv
-      └── RT-PCR.csv
+      ├── data.csv
+      ├── data_ave.csv
+      ├── data_se.csv
+      ├── data_norm_ave.csv
+      ├── data_norm_se.csv
+      ├── olaparib.txt
+      ├── niraparib.txt
+      ├── rucaparib.txt
+      ├── CBDCA.txt
+      ├── BF-olaparib.txt
+      ├── BF-niraparib.txt
+      ├── BF-rucaparib.txt
+      ├── BF-CBDCA.txt
+      └── Ranking.csv
 
-2 directories, 7 files
+3 directories, 21 files
 ```
