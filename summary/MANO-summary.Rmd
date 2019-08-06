@@ -1,0 +1,1271 @@
+---
+title: BRCA2 variant classification by a high-throughput functional assay
+author: "Masachika Ikegami"
+date: "May 30, 2019"
+output:
+  pdf_document:
+    fig_caption: yes
+    latex_engine: xelatex
+    number_sections: yes
+    toc: true
+  html_document:
+    df_print: paged
+    toc: yes
+header-includes:
+- \usepackage{amsmath,amssymb}
+- \usepackage{mathspec}
+- \setlength{\mathindent}{0pt} 
+classoption: xelatex,ja=standard,fleqn 
+---
+\pagebreak
+# Setting up
+## Loading necessary packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE)
+knitr::opts_chunk$set(tidy=TRUE)
+knitr::opts_chunk$set(warning=FALSE)
+knitr::opts_chunk$set(error=FALSE)
+knitr::opts_chunk$set(fig.width=6, fig.height=6,
+    fig.align='center', fig.pos='H', out.extra='', 
+    tidy.opts = list(width.cutoff = 45))
+knitr::opts_knit$set(root.dir="/mnt/HDD/share/R_analysis/BRCA2")
+setwd("/mnt/HDD/share/R_analysis/BRCA2")
+
+options(scipen=100)
+
+library(knitr)
+library(ggplot2)
+library(ggmcmc)
+library(rstan)
+library(mclust)
+library(tidyverse)
+library(reshape2)
+library(ggsci)
+library(pROC)
+library(car)
+library(shinystan)
+```
+```{r,eval=FALSE}
+knitr::opts_chunk$set(message=FALSE)
+knitr::opts_chunk$set(tidy=TRUE)
+knitr::opts_chunk$set(warning=FALSE)
+knitr::opts_chunk$set(error=FALSE)
+knitr::opts_chunk$set(fig.width=6, fig.height=6,
+    fig.align='center', fig.pos='H', out.extra='', 
+    tidy.opts = list(width.cutoff = 45))
+knitr::opts_knit$set(root.dir="~/MANO")
+setwd("~/MANO")
+
+
+options(scipen=100)
+
+library(knitr)
+library(ggplot2)
+library(ggmcmc)
+library(rstan)
+library(mclust)
+library(tidyverse)
+library(reshape2)
+library(ggsci)
+library(pROC)
+library(car)
+library(shinystan)
+```
+
+## Checking the package versions
+```{r}
+paste("ggplot2 version:", packageVersion("ggplot2"))
+paste("ggmcmc version:", packageVersion("ggmcmc"))
+paste("rstan version:", packageVersion("rstan"))
+paste("mclust version:", packageVersion("mclust"))
+paste("tidyverse version:", packageVersion("tidyverse"))
+paste("reshape2 version:", packageVersion("reshape2"))
+paste("ggsci version:", packageVersion("ggsci"))
+paste("pROC version:", packageVersion("pROC"))
+paste("car version:", packageVersion("car"))
+paste("shinystan version:", packageVersion("shinystan"))
+```
+
+## Multi-core setting: optional
+Only when using a multi-core processor.
+```{r}
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+\pagebreak
+
+
+# Processing barcode read numbers
+
+Every functional assay was performed with 2 standards composed of wild-type and D2723H variants of BRCA2 as positive and negative controls. The ratio of cell number with each BRCA2 variant was calculated with barcode read numbers obtained from the next-generation sequencer. The ratio of every experiments was normalized by dividing by that of drugless culture. The normalized viability values was transformed into logarithmic scale with a base of 10, and then rescaled into log10(1.0) for wild-type and log10(0.003) for D2723H. The average and standard error across all replicated experiments in each batch were calculated.
+
+## Logarithmic transformation of barcode read numbers
+Load the barcode-read-summary file obtained from a next-generation sequencer; change the file name as appropriate before running.
+```{r}
+r <- read.csv(file = "read_summary.csv")
+```
+Add 1 to each barcode read number for logarithmic transformation.
+```{r}
+r[3:ncol(r)] <- r[3:ncol(r)] + 1
+```
+Sum-up of barcode read numbers from paired-end reads.
+```{r}
+r_paired <- r[1:(ncol(r)/2+1)]
+for(i in 3:ncol(r_paired)){
+  r_paired[i] <- r[2*i-3] + r[2*i-2]
+}
+```
+Obtain the logarithmic read ratio of each variant in each experiment.
+```{r}
+r_sum <- matrix(0, 1, (ncol(r_paired)))
+r_sum[3:ncol(r_sum)] <- apply(r_paired[3:ncol(r_paired)], 2, sum)
+r_prop <- r_paired
+for(i in 3:ncol(r_prop)){
+  r_prop[[i]] <- r_prop[[i]] / r_sum[[i]]
+  r_prop[i] <- log(r_prop[i], base=10)
+}
+```
+Logarithmic viability values relative to drugless culture in each experiments.
+```{r}
+r_FC <- r_prop
+r_drugless <- apply(r_prop[3:5],1,mean)
+for(i in 3:ncol(r_prop)){
+  r_FC[i] <- r_prop[i] - r_drugless
+}
+```
+Obtain the average and standard error of logarithmic viability values in each batch.
+```{r}
+r_ave <- r_FC[1:((ncol(r_FC)+4)/3)]
+r_se <- r_FC[1:((ncol(r_FC)+4)/3)]
+for(i in 1:((ncol(r_FC)-2)/3)){
+  r_ave[i+2] <- apply(r_FC[(3*i):(3*i+2)],1,mean)
+  r_se[i+2] <- apply(r_FC[(3*i):(3*i+2)],1,sd)/sqrt(3)
+}
+```
+Normalize and rescale the viability values to wild-type (log10(1)) & D2723H (log10(0.003)).
+```{r}
+r_WT <- apply(subset(r_ave, Name == 'Wild-type')[3:ncol(r_ave)],2,mean)
+r_D2723H <- apply(subset(r_ave, Name == 'D2723H')[3:ncol(r_ave)],2,mean)
+r_norm <- r_FC[1:(ncol(r_FC)-3)]
+for(i in 2:((ncol(r_norm)-2)/3)){
+  for(j in 1:nrow(r_norm)){
+    r_norm[[(3*i-3)]][j] <- (r_FC[[(3*i)]][j] - r_WT[i]) * (- log(0.003,10)) / (r_WT[i] - r_D2723H[i])
+    r_norm[[(3*i-2)]][j] <- (r_FC[[(3*i+1)]][j] - r_WT[i]) * (- log(0.003,10)) / (r_WT[i] - r_D2723H[i])
+    r_norm[[(3*i-1)]][j] <- (r_FC[[(3*i+2)]][j] - r_WT[i]) * (- log(0.003,10)) / (r_WT[i] - r_D2723H[i])
+  }
+}
+```
+Obtain the average and standard error of normalized logarithmic relative viability in each batch.
+```{r}
+r_norm_ave <- r_norm[1:((ncol(r_FC)+1)/3)]
+r_norm_se <- r_norm[1:((ncol(r_FC)+1)/3)]
+for(i in 1:((ncol(r_norm)-2)/3)){
+  r_norm_ave[i+2] <- apply(r_norm[(3*i):(3*i+2)],1,mean)
+  r_norm_se[i+2] <- apply(r_norm[(3*i):(3*i+2)],1,sd)/sqrt(3)
+}
+```
+Save the normalized data.
+```{r}
+write.csv(r_norm, "data.csv",row.names=FALSE)
+write.csv(r_ave, "data_ave.csv",row.names=FALSE)
+write.csv(r_se, "data_se.csv",row.names=FALSE)
+write.csv(r_norm_ave, "data_norm_ave.csv",row.names=FALSE)
+write.csv(r_norm_se, "data_norm_se.csv",row.names=FALSE)
+```
+
+## Beta distribution parameter estimation
+Parameters were determined by identifying the Beta distribution whose 2.5th and 97.5th percentiles of pathogenic/intermediate component fit the upper and lower limits of Align-GVGD prediction in each class.
+```{r, include=FALSE, eval=FALSE}
+# C65: P(pathogenic) 0.81 (95% CI: 0.61-0.95); Beta(15.00,3.48)
+l_abc65 <- NULL
+for(i in seq(12,20,0.01)){
+  for(j in seq(2.7,4.5,0.01)){
+    tmp1 <- qbeta(0.025, i,j)
+    tmp2 <- qbeta(0.975, i,j)
+    if(0.6095<tmp1 && tmp1<0.6105 && 0.9495<tmp2 && tmp2<0.9505){
+        l_abc65 <- c(l_abc65,list(c(i,j)))
+    }
+  }
+}
+
+# C35-55: P(pathogenic) 0.66 (95% CI: 0.34-0.93); Beta(5.38,2.57)
+l_abc35 <- NULL
+for(i in seq(5,6,0.01)){
+  for(j in seq(2,3,0.01)){
+    tmp1 <- qbeta(0.025, i,j)
+    tmp2 <- qbeta(0.975, i,j)
+    if(0.3395<tmp1 && tmp1<0.3405 && 0.9295<tmp2 && tmp2<0.9305){
+        l_abc35 <- c(l_abc35,list(c(i,j)))
+    }
+  }
+}
+
+# C15-25: P(pathogenic) 0.29 (95% CI: 0.09-0.56); Beta(3.76,9.00)
+l_abc15 <- NULL
+for(i in seq(3,5,0.01)){
+  for(j in seq(8,10,0.01)){
+    tmp1 <- qbeta(0.025, i,j)
+    tmp2 <- qbeta(0.975, i,j)
+    if(0.0895<tmp1 && tmp1<0.0905 && 0.5595<tmp2 && tmp2<0.5605){
+        l_abc15 <- c(l_abc15,list(c(i,j)))
+    }
+  }
+}
+
+# C0: P(pathogenic) 0.01 (95% CI: 0.00-0.06); Beta(1.43,73.10)
+l_abc0 <- NULL
+for(i in seq(1,2,0.01)){
+  for(j in seq(50,150,0.01)){
+    tmp1 <- qbeta(0.025, i,j)
+    tmp2 <- qbeta(0.975, i,j)
+    if(tmp1<0.005 && 0.0599<tmp2 && tmp2<0.0601){
+        l_abc0 <- c(l_abc0,list(c(i,j)))
+    }
+  }
+}
+
+# Outside key domains: P(pathogenic) 0.01 (95% CI: 0.00-0.04); Beta(1.64,120.44)
+l_abc_O <- NULL
+for(i in seq(1.5,2.5,0.01)){
+  for(j in seq(60,200,0.01)){
+    tmp1 <- qbeta(0.025, i,j)
+    tmp2 <- qbeta(0.975, i,j)
+    if(tmp1<0.005 && 0.0399<tmp2 && tmp2<0.0401){
+        l_abc_O <- c(l_abc_O,list(c(i,j)))
+    }
+  }
+}
+
+# Nonsense variant: P(pathogenic) 0.995 (95% CI: 0.99-1.00); Beta(387,1.07)
+l_abc_N <- NULL
+for(i in seq(300,600,1)){
+  for(j in seq(1,1.1,0.001)){
+    tmp1 <- qbeta(0.025, i,j)
+    tmp2 <- qbeta(0.975, i,j)
+    if(tmp1>0.99){
+        l_abc_N <- c(l_abc_N,list(c(i,j)))
+    }
+  }
+}
+```
+```{r}
+# C65: P(pathogenic) 0.81 (95% CI: 0.61-0.95); Beta(15.00,3.48)
+qbeta(0.025,15.00,3.48)
+qbeta(0.975,15.00,3.48)
+# C35-55: P(pathogenic) 0.66 (95% CI: 0.34-0.93); Beta(5.38,2.57)
+qbeta(0.025,5.38,2.57)
+qbeta(0.975,5.38,2.57)
+# C15-25: P(pathogenic) 0.29 (95% CI: 0.09-0.56); Beta(3.76,9.00)
+qbeta(0.025,3.76,9.00)
+qbeta(0.975,3.76,9.00)
+# C0: P(pathogenic) 0.01 (95% CI: 0.00-0.06); Beta(1.43,73.10)
+qbeta(0.025,1.43,73.10)
+qbeta(0.975,1.43,73.10)
+# Outside key domains: P(pathogenic) 0.01 (95% CI: 0.00-0.04); Beta(1.64,120.44)
+qbeta(0.025,1.64,120.44)
+qbeta(0.975,1.64,120.44)
+# Nonsense variant: P(pathogenic) 0.995 (95% CI: 0.99-1.00); Beta(387,1.07)
+qbeta(0.025,387,1.07)
+qbeta(0.975,387,1.07)
+curve(dbeta(x,15.00,3.48),0,1,col = "green",ylab="Density") # C65
+curve(dbeta(x,5.38,2.57),0,1,add=T,col = "red") # C35-55
+curve(dbeta(x,3.76,9.00),0,1,add=T,col = "blue") # C15-25
+curve(dbeta(x,1.43,73.10),0,1,add=T,col = "orange") # C0
+curve(dbeta(x,1.64,120.44),0,1,add=T,col = "black")# Outside key domains
+curve(dbeta(x,387,1.07),0,1,add=T,col = "dodgerblue") # Nonsense variant
+```
+
+
+## Manual data processing
+Combine the results of all experiments and add information on variants, experiments, batches and drugs to the normalized data for Hamiltonian Monte Carlo simulation. Save the data as "data_HMC.csv".
+
+\pagebreak
+
+
+# Model fitting
+
+## Data loading
+Load the processed data composed of normalized logarithmic fold-change from all experiments.
+```{r}
+d <- read.csv(file = "data_HMC.csv", stringsAsFactors=FALSE)
+Drug <- c("olaparib", "niraparib", "rucaparib", "CBDCA")
+Drug_No <- length(Drug)
+d_ <- NULL
+v_l <- NULL
+v_l2 <- NULL
+v_list <- NULL
+for(i in 1:Drug_No){
+  d__ <- list(subset(d, drug == Drug[i]))
+  d_ <- c(d_,list(subset(d__[[1]], batch <2)))
+  v_l <- c(v_l,list(unique(d_[[i]]$var_name)))
+  v_l2 <- c(v_l2,list(v_l[[i]][-which(v_l[[i]] %in% c("Wild-type","D2723H"))]))
+  v_list <-c(v_list,list(c(c("Wild-type","D2723H"),v_l2[[i]])))
+  var_num <- rep(0,length(d_[[i]]$var_name))
+  var_cnt <- rep(0,length(d_[[i]]$var_name))
+  score_ave <- rep(0,length(d_[[i]]$var_name))
+  for(k in 1:(length(d_[[i]]$var_name))){
+    for(l in 1:(length(d_[[i]]$var_name))){
+      if(d_[[i]]$var_name[[k]] == d_[[i]]$var_name[[l]]){
+        score_ave[k] = score_ave[k] + d_[[i]]$score[[l]]
+        var_cnt[k]  = var_cnt[k] + 1
+      }
+    }
+    score_ave[k] = score_ave[k] / var_cnt[k]
+  }
+  d_[[i]] <-cbind(d_[[i]],var_num,score_ave)
+}
+d_107 <- d_
+v_list_107 <- v_list
+d_ <- NULL
+d___<-NULL
+v_l <- NULL
+v_l2 <- NULL
+v_list <- NULL
+IARC <- NULL
+ClinVar <- NULL
+aGVGD <- NULL
+position <- NULL
+Iclass <- NULL
+for(i in 1:Drug_No){
+  d__ <- list(subset(d, drug == Drug[i]))
+  d___ <- c(d___,list(subset(d__[[1]], batch < 4)))
+  d_ <- c(d_,list(merge(subset(d___[[i]], standard=="Class 1/2"), subset(d___[[i]], standard=="Class 4/5"), all=T)))
+  v_l <- c(v_l,list(unique(d_[[i]]$var_name)))
+  v_l2 <- c(v_l2,list(v_l[[i]][-which(v_l[[i]] %in% c("Wild-type","D2723H"))]))
+  v_list <-c(v_list,list(c(c("Wild-type","D2723H"),v_l2[[i]])))
+  var_num <- rep(0,length(d_[[i]]$var_name))
+  var_cnt <- rep(0,length(d_[[i]]$var_name))
+  score_ave <- rep(0,length(d_[[i]]$var_name))
+  IARC <- c(IARC, list(rep(0,length(v_l[[i]]))))
+  position <- c(position, list(rep(0,length(v_l[[i]]))))
+  Iclass <- c(Iclass, list(rep(0,length(v_l[[i]]))))
+  aGVGD <- c(aGVGD, list(rep(0,length(v_l[[i]]))))
+  for(k in 1:(length(d_[[i]]$var_name))){
+    for(l in 1:(length(d_[[i]]$var_name))){
+      if(d_[[i]]$var_name[[k]] == d_[[i]]$var_name[[l]]){
+        score_ave[k] = score_ave[k] + d_[[i]]$score[[l]]
+        var_cnt[k]  = var_cnt[k] + 1
+      }
+    }
+    score_ave[k] = score_ave[k] / var_cnt[k]
+    for(j in 1:(length(v_list[[i]]))){
+      if(d_[[i]]$var_name[[k]] == v_list[[i]][j]){
+        var_num[k] <- j
+        IARC[[i]][j] <- d_[[i]]$standard[[k]]
+        aGVGD[[i]][j] <- d_[[i]]$aGVGD_class[[k]]
+        Iclass[[i]][j] <- d_[[i]]$IARC_class[[k]]
+        position[[i]][j] <- d_[[i]]$position[[k]]
+      }
+    }
+  }
+  d_[[i]] <-cbind(d_[[i]],var_num,score_ave)
+}
+d_t <- d_
+v_list_t <- v_list
+IARC_t <- IARC
+position_t <- position
+Iclass_t <- Iclass
+aGVGD_t <- aGVGD
+
+d_ <- NULL
+d___<-NULL
+v_l <- NULL
+v_l2 <- NULL
+v_list <- NULL
+IARC <- NULL
+ClinVar <- NULL
+aGVGD <- NULL
+position <- NULL
+Iclass <- NULL
+for(i in 1:Drug_No){
+  d__ <- list(subset(d, drug == Drug[i]))
+  d_ <- c(d_,list(subset(d__[[1]], batch < 4)))
+  v_l <- c(v_l,list(unique(d_[[i]]$var_name)))
+  v_l2 <- c(v_l2,list(v_l[[i]][-which(v_l[[i]] %in% c("Wild-type","D2723H"))]))
+  v_list <-c(v_list,list(c(c("Wild-type","D2723H"),v_l2[[i]])))
+  var_num <- rep(0,length(d_[[i]]$var_name))
+  var_cnt <- rep(0,length(d_[[i]]$var_name))
+  score_ave <- rep(0,length(d_[[i]]$var_name))
+  IARC <- c(IARC, list(rep(0,length(v_l[[i]]))))
+  position <- c(position, list(rep(0,length(v_l[[i]]))))
+  Iclass <- c(Iclass, list(rep(0,length(v_l[[i]]))))
+  aGVGD <- c(aGVGD, list(rep(0,length(v_l[[i]]))))
+  ClinVar <- c(ClinVar, list(rep(0,length(v_l[[i]]))))
+  for(k in 1:(length(d_[[i]]$var_name))){
+    for(l in 1:(length(d_[[i]]$var_name))){
+      if(d_[[i]]$var_name[[k]] == d_[[i]]$var_name[[l]]){
+        score_ave[k] = score_ave[k] + d_[[i]]$score[[l]]
+        var_cnt[k]  = var_cnt[k] + 1
+      }
+    }
+    score_ave[k] = score_ave[k] / var_cnt[k]
+    for(j in 1:(length(v_list[[i]]))){
+      if(d_[[i]]$var_name[[k]] == v_list[[i]][j]){
+        var_num[k] <- j
+        IARC[[i]][j] <- d_[[i]]$standard[[k]]
+        ClinVar[[i]][j] <- d_[[i]]$ClinVar[[k]]
+        aGVGD[[i]][j] <- d_[[i]]$aGVGD_class[[k]]
+        Iclass[[i]][j] <- d_[[i]]$IARC_class[[k]]
+        position[[i]][j] <- d_[[i]]$position[[k]]
+      }
+    }
+  }
+  d_[[i]] <-cbind(d_[[i]],var_num,score_ave)
+}
+d_f <- d_
+v_list_f <- v_list
+IARC_f <- IARC
+position_f <- position
+Iclass_f <- Iclass
+aGVGD_f <- aGVGD
+
+d_ <- NULL
+d___<-NULL
+v_l <- NULL
+v_l2 <- NULL
+v_list <- NULL
+IARC <- NULL
+ClinVar <- NULL
+aGVGD <- NULL
+position <- NULL
+Iclass <- NULL
+for(i in 1:Drug_No){
+  d__ <- list(subset(d, drug == Drug[i]))
+  d_ <- c(d_,list(d__[[1]]))
+  v_l <- c(v_l,list(unique(d_[[i]]$var_name)))
+  v_l2 <- c(v_l2,list(v_l[[i]][-which(v_l[[i]] %in% c("Wild-type","D2723H"))]))
+  v_list <-c(v_list,list(c(c("Wild-type","D2723H"),v_l2[[i]])))
+  var_num <- rep(0,length(d_[[i]]$var_name))
+  var_cnt <- rep(0,length(d_[[i]]$var_name))
+  score_ave <- rep(0,length(d_[[i]]$var_name))
+  IARC <- c(IARC, list(rep(0,length(v_l[[i]]))))
+  position <- c(position, list(rep(0,length(v_l[[i]]))))
+  Iclass <- c(Iclass, list(rep(0,length(v_l[[i]]))))
+  aGVGD <- c(aGVGD, list(rep(0,length(v_l[[i]]))))
+  ClinVar <- c(ClinVar, list(rep(0,length(v_l[[i]]))))
+  for(k in 1:(length(d_[[i]]$var_name))){
+    for(l in 1:(length(d_[[i]]$var_name))){
+      if(d_[[i]]$var_name[[k]] == d_[[i]]$var_name[[l]]){
+        score_ave[k] = score_ave[k] + d_[[i]]$score[[l]]
+        var_cnt[k]  = var_cnt[k] + 1
+      }
+    }
+    score_ave[k] = score_ave[k] / var_cnt[k]
+    for(j in 1:(length(v_list[[i]]))){
+      if(d_[[i]]$var_name[[k]] == v_list[[i]][j]){
+        var_num[k] <- j
+        IARC[[i]][j] <- d_[[i]]$standard[[k]]
+        ClinVar[[i]][j] <- d_[[i]]$ClinVar[[k]]
+        aGVGD[[i]][j] <- d_[[i]]$aGVGD_class[[k]]
+        Iclass[[i]][j] <- d_[[i]]$IARC_class[[k]]
+        position[[i]][j] <- d_[[i]]$position[[k]]
+      }
+    }
+  }
+  d_[[i]] <-cbind(d_[[i]],var_num,score_ave)
+}
+d_A <- d_
+v_list_A <- v_list
+IARC_A <- IARC
+position_A <- position
+Iclass_A <- Iclass
+aGVGD_A <- aGVGD
+```
+
+## Gaussian finite mixture model fitted by expectation–maximization algorithm
+Use expectation–maximization algorithm to determine the appropriate Gaussian mixture model for the data. BIC: Bayesian information criterion.
+```{r}
+for(i in 1:Drug_No){
+  plot(mclustBIC(d_f[[i]]$score,modelNames="V"), 
+       main=paste("EM estimation for",Drug[[i]]))
+}
+```
+
+## Scatter plot of relative viability ranking data
+Relative viability ranking data of 107 variants between olaparib and other drugs.
+```{r}
+d_rank <- NULL
+ranking <- NULL
+rank_ <- NULL
+for(i in 1:Drug_No){
+  d_rank <- c(d_rank,list(d_107[[i]][!duplicated(d_107[[i]]$var_name),]))
+  len <- length(d_rank[[i]]$var_name)
+  rank_ <- c(rank_,list(len+1-rank(d_rank[[i]]$score_ave)))
+}
+anchor <- rep("N",3*len)
+rank_o <- rep(rank_[[1]],3)
+rank_nrc <- c(rank_[[2]],rank_[[3]],rank_[[4]])
+rank_d <- c(rep(Drug[2],len),rep(Drug[3],len),rep(Drug[4],len))
+for(i in 1:(3*len)){
+  if(rank_o[i] == 83 | rank_o[i] == 84
+     | rank_o[i] == 85 | rank_o[i] == 87)
+    anchor[i] <- "Y"
+}
+ranking <- data.frame(rank_o, rank_nrc, rank_d, anchor)
+colnames(ranking) <- c("Olap_rank","Ranking","Drug","Anchor")
+
+write.csv(ranking, "Ranking.csv",row.names=FALSE)
+
+Colors <- c("dodgerblue", "orange", "firebrick2")
+
+g <- ggplot(ranking, aes(x=Olap_rank, y=Ranking, col= Drug, size = Anchor))
+g <- g + geom_point(alpha= 0.6)
+g <- g + xlab("Relative viability ranking for olaparib")
+g <- g + ylab("Relative viability ranking for each drug")
+g <- g + geom_hline(yintercept=87.5,linetype="dashed",colour="red") 
+g <- g + geom_hline(yintercept=82.5,linetype="dashed",colour="green") 
+g <- g + geom_vline(xintercept=87.5,linetype="dashed",colour="red") 
+g <- g + geom_vline(xintercept=82.5,linetype="dashed",colour="green") 
+g <- g + theme_classic()
+g <- g + scale_color_manual(values = Colors)
+g <- g + scale_fill_manual(values = Colors)
+g
+```
+
+
+## Density estimation
+Estimated density curve of 244 variants on the basis of 2-component mixed Gaussian distribution. QQ-plots of standardized residuals are also shown.
+```{r, results='hide'}
+Mc_B = NULL
+for(i in 1:Drug_No){
+  Mc_B <- c(Mc_B, list(densityMclust(d_f[[i]]$score, modelNames="V", G=2)))
+}
+```
+```{r}
+Mc_par <- NULL
+for(i in 1:Drug_No){
+  plotDensityMclust1(Mc_B[[i]], data=d_f[[i]]$score, xlab="Log-normalized relative viability", col = "red",
+       main=paste("Density estimation  with ", Drug[[i]]))
+  legend("topleft", legend = c("Estimation","Observed"), 
+       col = c("red","grey80"), lty = c(1,1), lwd = c(1,5))
+  plot(Mc_B[[i]], what = "diagnostic", type="qq", sub=c(paste(
+    "QQ plot of the model's expected viability data with ", Drug[[i]])))
+  Mc_par <- c(Mc_par, list(summary(Mc_B[[i]], parameters=T))) # check the mean values of benign components
+}
+```
+
+## Receiver operating characteristic curve
+A operating characteristics analysis of the data obtained from the established pathogenic and benign variants.
+```{r}
+roc.model <- NULL
+roc.auc <- NULL
+roc.thr <- NULL
+roc.cut <- NULL
+for(i in 1:Drug_No){
+  roc.model <- c(roc.model, list(roc(standard ~ score_ave,
+          data=d_t[[i]])))
+  roc.auc <- c(roc.auc,list(ci(roc.model[[i]], of = "auc",
+                             method = "delong")))
+  roc.cut <- c(roc.cut,list(coords(roc.model[[i]], x="best", 
+      ret=c("threshold", "sensitivity", "specificity"),
+      best.method="youden")))
+  plot(roc.model[[i]], legacy.axes = TRUE,
+       main=paste("ROC curve ",
+      "with ", Drug[[i]]))
+  legend("bottomright", legend = paste(
+        "AUC = ", round(roc.auc[[i]][1], digits=2),
+        "\nSensitivity = ", round(roc.cut[[i]][2], digits=2),
+        "\nSpecificity = ", round(roc.cut[[i]][3], digits=2),
+        "\n", sep=""))
+}
+```
+
+\pagebreak
+
+
+# Hamiltonian Monte Carlo simulation
+
+Data formatting for Hamiltonian Monte Carlo simulation to fit a 2-component Gaussian mixture model with unequal variances. The wild-type is labeled as benign and D2723H is labeled as pathogenic. All the remaining variants are unlabeled in the following analysis.
+
+## The classification model
+The 2-component mixed normal distribution model is as follows:
+$$
+\begin{aligned}
+&\prod_{v} \operatorname{Pr}\left(f_{v} | D_{v}, X_{v}, \theta\right)=\\
+&\prod_{\left\{v : D_{v}=D\right\}} \operatorname{Pr}\left(f_{v} | D_{v}=D, X_{v}, \theta\right)
+\prod_{\left\{v : D_{v}=N\right\}} \operatorname{Pr}\left(f_{v} | D_{v}=N, X_{v}, \theta\right)\\
+&\prod_{\left\{v : D_{v} \text { is Unknown }\right\}}
+\left[\pi_{a(v,D)} \operatorname{Pr}\left(f_{v} | D_{v}=D, X_{v}, \theta\right)+
+\pi_{a(v,N)} \operatorname{Pr}\left(f_{v} | D_{v}=N, X_{v}, \theta\right)\right]\\
+\end{aligned}
+$$
+
+$$
+\begin{aligned}
+&\operatorname{Pr}\left(\operatorname{Data} | \operatorname{Parameters}\right) \text{: likelihood of Data observation with Parameters}\\
+&v\text{: variant index}\\
+&f_{v}\text{: measurements of functional experiments for }v\\
+&D_{v}\text{:}\left\{
+\begin{aligned}
+&D_{v} = D\>(v = \text{deleterious})\\
+&D_{v} = N\>(v = \text{neutral})\\
+\end{aligned}
+\right.\\
+&X_{v}\text{: batch and experimental indices for each measurement}\\
+&\theta\text{: model parameters}\\
+&\pi_{a(v,D/N)}\text{: prior probability that }v\text{ is deleterious/neutral}\\
+\end{aligned}
+$$
+
+## Incorporating the functional assay data
+The true distribution of data and parameters are estimated by the formula below: 
+$$
+\operatorname{Pr}\left(f_{v^{*}} | D_{v^{*}}, X_{v^{*}}, \theta\right)=\prod_{\left\{(v,b,e) : v=v^{*}\right\}} \operatorname{Pr}\left(f_{v} | D_{v}, b, e, \theta\right)\\
+$$
+
+$$
+\begin{aligned}
+&b\text{: batch index}\\
+&e\text{: experimental index}\\
+&\beta_{b}\text{: batch-specific random intercept effect}\\
+&\tau_{b}\text{: batch-specific random slope effect}\\
+&\kappa_{1}\text{: center of the distribution }\beta_{b}\\
+&\kappa_{2}\text{: center of the distribution }\tau_{b}\\
+&\lambda_{1}\text{: standard deviation of distribution }\beta_{b}\\
+&\lambda_{2}\text{: standard deviation of distribution }\tau_{b}\\
+&\eta_{v}\text{: variant-specific random effect}\\
+&\eta_{\mathrm{del}}\text{: center of the deleterious variants' } \eta_{v}\text{ distribution }\\
+&\eta_{\mathrm{neu}}\text{: center of the neutral variants' } \eta_{v}\text{ distribution }\\
+&\sigma_{1}\text{: standard deviation of the deleterious variants' } \eta_{v}\text{ distribution }\\
+&\sigma_{2}\text{: standard deviation of the neutral variants' } \eta_{v}\text{ distribution }\\
+&\psi\text{: residual error}\\
+&\text{Key domains: }\left\{
+\begin{aligned}
+&\text{PALB2 interaction domain (amino acid residues 10-40)}\\
+&\text{DNA-binding domain (2481-3186)}\\
+&\text{TR2 RAD51-binding domain (3269-3305)}\\
+\end{aligned}
+\right.\\
+\end{aligned}
+$$
+The right-hand side term in the equation above is specified by the following hierarchical model.
+Prior probability is selectable from noninformative distribution or Align-GVGD based distribution.
+
+iid: independent and identically distributed
+$$
+\begin{aligned}
+f_{v} & \sim \operatorname{Normal}\left(\beta_{b}+\tau_{b}\eta_{v}, \tau_{b}\psi\right)\\
+\beta_{b} & \sim \operatorname{Normal}\left(\kappa_{1}, \lambda_{1}\right) &\\
+\tau_{b} & \sim \operatorname{Normal}\left(\kappa_{2}, \lambda_{2}\right), \tau_{b} > 0&\\
+\eta_{v}\left|D_{v}=D\right.& \sim \operatorname{Normal}\left(\eta_{\mathrm{del}}, \sigma_{\mathrm{1}}\right) \quad\left\{v: D_{v}=D \wedge v \neq \mathrm{D2723H}\right\} \\
+\eta_{v}\left|D_{v}=N\right.& \sim \operatorname{Normal}\left(\eta_{\mathrm{neu}}, \sigma_{\mathrm{2}}\right) \quad\left\{v: D_{v}=N \wedge v \neq \operatorname{WT}\right\} \\ 
+\eta_{\mathrm{WT}} &=\log_{10} (1.0)\\
+\eta_{\mathrm{D2723H}} &=\log_{10} (0.003) \\
+\eta_{\mathrm{nue}} &= \text{estimated value by mclust package with the training data set} \\
+\eta_{\mathrm{del}} & \sim \text {Normal}(\eta_{\mathrm{D2723H}},5)\quad\quad\quad\quad\text{(training data set)} \\
+\eta_{\mathrm{del}} &= \text {as } \beta_{b}+\tau_{b}\eta_{\mathrm{del}}\text{ value is the same in the training data set}\quad\text{(full analysis)} \\
+\kappa_{1} & \sim \text {Normal}(0,5)\\
+\kappa_{2} & \sim \text {Normal}(1,5)\\
+\psi, \sigma_{1}, \sigma_{2}, \lambda_{1}, \lambda_{2} &\overset{iid}{\sim} \text {HalfNormal}(0,5) \\
+D_{v} & \sim \operatorname{Bernoulli}\left(\pi_{a(v)}\right)  \quad\left\{v: D_{v} \text { is unknown}\right\}\\
+&\begin{aligned}
+\quad\pi_{a(v)} & \sim \operatorname{Beta}(1,1)  \quad \text{(noninformative prior probability)}\\
+\end{aligned}\\
+&\text{}\quad \quad \quad \quad or\\
+&\text{Align-GVGD-based prior probability}
+\\&\left\{
+\begin{aligned}
+\pi_{a(v)} & \sim \operatorname{Beta}(15.00,3.48)  \quad \left\{ v \in C65, \text {inside key domains} \right\}\\
+\pi_{a(v)} & \sim \operatorname{Beta}(5.38,2.57)  \quad \left\{ v \in C35,C45,C55, \text {inside key domains} \right\}\\
+\pi_{a(v)} & \sim \operatorname{Beta}(3.76,9.00)  \quad \left\{ v \in C15,C25, \text {inside key domains} \right\}\\
+\pi_{a(v)} & \sim \operatorname{Beta}(1.43,73.1)  \quad \left\{ v \in C0, \text {inside key domains} \right\}\\
+\pi_{a(v)} & \sim \operatorname{Beta}(1.64,120.44)  \quad \left\{ v \in  \text {outside key domains} \right\}\\
+\pi_{a(v)} & \sim \operatorname{Beta}(387,1.07)  \quad \left\{ v \in \text {nonsense variants} \right\}\\
+\end{aligned}
+\right.\\
+\end{aligned}
+$$
+
+## Stan simulation program
+Hamiltonian Monte Carlo simulation code for 2-component model written in Stan language is as follows.
+Choose prior distribution as you think.
+
+For the training data set
+```{r, eval=FALSE}
+stan_code <- 
+"data{
+  int N;
+  int B[N];
+  int BN;
+  int V;
+  vector[N] Y;
+  int variant[N];
+  real mu2;
+}
+
+transformed data{
+  vector[2] fix;
+  fix[1] = 0;
+  fix[2] = -2.522879;
+}
+
+parameters{
+  simplex[2] pi_[V];
+  real mu1;
+  real kappa_[2];
+  real<lower=0> lambda_[2];
+  real<lower=0> psi_;
+  vector[V] eta;
+  vector[BN] bet_;
+  vector<lower=0>[BN] tau_;
+  vector<lower=0>[2] sigma_;
+}
+
+transformed parameters{
+  vector[V] eta_;
+  matrix[V,2] lnp;
+  vector[2] mu_;
+  eta_[1] = fix[1];
+  eta_[2] = fix[2];
+  mu_[1] = mu1;
+  mu_[2] = mu2;
+  for(v in 3:V){
+    eta_[v] = eta[v];
+  }
+  for(i in 1:2){
+    for(v in 1:V){
+      lnp[v,i] = log(pi_[v,i]) + 
+          normal_lpdf(eta_[v] | mu_[i], sigma_[i]);
+    }
+  }
+}
+
+model{
+  for(v in 1:V){
+    target += log_sum_exp(lnp[v]);
+  }
+  for(i in 1:BN){
+    bet_[i] ~ normal(kappa_[1], lambda_[1]);
+    tau_[i] ~ normal(kappa_[2], lambda_[2]);
+  }
+  for(n in 1:N){
+      Y[n] ~ normal(bet_[B[n]]
+          +tau_[B[n]]*eta_[variant[n]], tau_[B[n]]*psi_);
+  }
+
+  sigma_ ~ normal(0, 5);
+  psi_ ~ normal(0, 5);
+  lambda_ ~ normal(0, 5);
+  kappa_[1] ~ normal(0, 5);
+  kappa_[2] ~ normal(1, 5);
+  mu1 ~ normal(fix[2], 5);
+  for(n in 1:N)
+    pi_[variant[n]][1] ~ beta(1,1);
+}
+
+generated quantities{
+  matrix[V,2] p_y;
+  real tmp[N];
+  real mu1_;
+  for(v in 1:V){
+    p_y[v] = softmax(lnp[v]')';
+  }
+  for(n in 1:N){
+    tmp[n] = bet_[B[n]]+tau_[B[n]]*mu1;
+  }
+  mu1_ = sum(tmp)/N;
+}
+"
+stanmodel2 <- stan_model(model_code = stan_code)
+```
+
+For the full analysis with noninformative prior probability or with Align-GVGD prior probability
+```{r}
+stan_code <- 
+"data{
+  int N;
+  int B[N];
+  int BN;
+  int V;
+  vector[N] Y;
+  vector[N] la;
+  vector[N] lb;
+  int variant[N];
+  real mu1_;
+  real mu2;
+}
+
+transformed data{
+  vector[2] fix;
+  fix[1] = 0;
+  fix[2] = -2.522879;
+}
+
+parameters{
+  simplex[2] pi_[V];
+  real kappa_[2];
+  real<lower=0> lambda_[2];
+  real<lower=0> psi_;
+  vector[V] eta;
+  vector[BN] bet_;
+  vector<lower=0>[BN] tau_;
+  vector<lower=0>[2] sigma_;
+}
+
+transformed parameters{
+  vector[V] eta_;
+  matrix[V,2] lnp;
+  vector[2] mu_;
+  real mu1;
+  real tmp1[N];
+  real tmp2[N];
+  eta_[1] = fix[1];
+  eta_[2] = fix[2];
+  for(n in 1:N){
+    tmp1[n] = mu1_ - bet_[B[n]];
+    tmp2[n] = tau_[B[n]];
+  }
+  mu1 = sum(tmp1)/sum(tmp2);
+  mu_[1] = mu1;
+  mu_[2] = mu2;
+  for(v in 3:V){
+    eta_[v] = eta[v];
+  }
+  for(i in 1:2){
+    for(v in 1:V){
+      lnp[v,i] = log(pi_[v,i]) + 
+          normal_lpdf(eta_[v] | mu_[i], sigma_[i]);
+    }
+  }
+}
+
+model{
+  for(v in 1:V){
+    target += log_sum_exp(lnp[v]);
+  }
+  for(i in 1:BN){
+    bet_[i] ~ normal(kappa_[1], lambda_[1]);
+    tau_[i] ~ normal(kappa_[2], lambda_[2]);
+  }
+  for(n in 1:N){
+      Y[n] ~ normal(bet_[B[n]]
+          +tau_[B[n]]*eta_[variant[n]], tau_[B[n]]*psi_);
+  }
+
+  sigma_ ~ normal(0, 5);
+  psi_ ~ normal(0, 5);
+  lambda_ ~ normal(0, 5);
+  kappa_[1] ~ normal(0, 5);
+  kappa_[2] ~ normal(1, 5);
+  for(n in 1:N)
+//  pi_[variant[n]][1] ~ beta(la[n],lb[n]); // Align-GVGD prior
+  pi_[variant[n]][1] ~ beta(1,1); // noninformative prior
+}
+
+generated quantities{
+  matrix[V,2] p_y;
+  for(v in 1:V){
+    p_y[v] = softmax(lnp[v]')';
+  }
+}
+"
+stanmodel3 <- stan_model(model_code = stan_code)
+```
+
+
+## Execution of Hamiltonian Monte Carlo simulation
+Change "chains", "iter", "warmup" referring to R-hat values and posterior expectations. 
+
+For the training data set analysis
+```{r, eval=FALSE}
+mu2 <- c(-0.45, -0.47, -0.31, -0.35)
+data_t <- NULL
+for(i in 1:Drug_No){
+  data_t <- c(data_t, list(list(N = length(d_t[[i]]$var_num), V = max(d_t[[i]]$var_num),
+                  Y = d_t[[i]]$score, variant = d_t[[i]]$var_num, 
+                  B = d_t[[i]]$batch, BN = max(d_t[[i]]$batch)
+                  ,mu2 = mu2[[i]]
+                  )))
+}
+fit_t <- NULL
+for(i in 1:Drug_No){
+  fit_t <- c(fit_t, list(stan(file="Stan_code_2.Stan", data=data_t[[i]],
+            control=list(adapt_delta=0.99, max_treedepth = 20),
+            seed=1234, chains=4, iter=5000, warmup=1500, thin=1)))
+}
+save(fit_t ,file="fit_2.txt") 
+```
+
+For the full data set analysis
+```{r, eval=FALSE}
+mu1_ <- c(-2.60, -2.71, -1.92, -2.59)
+mu2 <- c(-0.45, -0.47, -0.31, -0.35)
+data_f <- NULL
+for(i in 1:Drug_No){
+  data_f <- c(data_f, list(list(N = length(d_f[[i]]$var_num), V = max(d_f[[i]]$var_num),
+                  Y = d_f[[i]]$score, variant = d_f[[i]]$var_num, 
+                  la = d_f[[i]]$a, lb = d_f[[i]]$b,
+                  B = d_f[[i]]$batch, BN = max(d_f[[i]]$batch)
+                  ,mu1_ = mu1_[[i]]
+                  ,mu2 = mu2[[i]]
+                  )))
+}
+fit_f <- NULL
+for(i in 1:Drug_No){
+  fit_f <- c(fit_f, list(stan(file="Stan_code_3.Stan", data=data_f[[i]],
+            control=list(adapt_delta=0.99, max_treedepth = 20),
+            seed=1234, chains=4, iter=5000, warmup=1500, thin=1)))
+}
+save(fit_f, file="fit_3.txt") 
+```
+For the accurate BRCA2 companion diagnostic test with niraparib
+```{r, eval=FALSE}
+mu1_ <- c(-2.60, -2.71, -1.92, -2.59)
+mu2 <- c(-0.45, -0.47, -0.31, -0.35)
+data_A <- NULL
+data_A <- list(list(N = length(d_A[[2]]$var_num), V = max(d_A[[2]]$var_num),
+                Y = d_A[[2]]$score, variant = d_A[[2]]$var_num, 
+                la = d_A[[2]]$a, lb = d_A[[2]]$b,
+                B = d_A[[2]]$batch, BN = max(d_A[[2]]$batch)
+                ,mu1_ = mu1_[[2]]
+                ,mu2 = mu2[[2]]))
+fit_A <- list(stan(file="Stan_code_3.Stan", data=data_A[[1]],
+            control=list(adapt_delta=0.99, max_treedepth = 20),
+            seed=1234, chains=4, iter=5000, warmup=1500, thin=1))
+save(fit_A,file="fit_4.txt")
+```
+
+
+\pagebreak
+ 
+ 
+# Quality check
+Judge the convergence of simulation if R-hat values of all parameters are < 1.1 or not.
+```{r eval=FALSE}
+for(i in 1:Drug_No){
+  launch_shinystan(fit_t[[i]])
+  launch_shinystan(fit_f[[i]])
+  launch_shinystan(fit_A[[i]])
+}
+```
+```{r include=FALSE}
+load(file="fit_3.txt") 
+```
+
+Select the data to analyse.
+```{r}
+#Dataset = "test"
+ Dataset = "full"
+#Dataset = "ABCD"
+
+if (Dataset == "test"){
+  Drug <- c("olaparib", "niraparib", "rucaparib", "CBDCA")
+  Drug_No <- length(Drug)
+  d_ <- d_t
+  v_list <- v_list_t
+  IARC <- IARC_t
+  position <- position_t
+  Iclass <- Iclass_t
+  aGVGD <- aGVGD_t
+  fit_ <- fit_t
+}
+if (Dataset == "full"){
+  Drug <- c("olaparib", "niraparib", "rucaparib", "CBDCA")
+  Drug_No <- length(Drug)
+  d_ <- d_f
+  v_list <- v_list_f
+  IARC <- IARC_f
+  position <- position_f
+  Iclass <- Iclass_f
+  aGVGD <- aGVGD_f
+  fit_ <- fit_f
+}
+if (Dataset == "ABCD"){
+  Drug <- "niraparib"
+  Drug_No <- length(Drug)
+  d_ <- d_A[[2]]
+  v_list <- list(v_list_A[[2]])
+  IARC <- list(IARC_A[[2]])
+  position <- list(position_A[[2]])
+  Iclass <- list(Iclass_A[[2]])
+  aGVGD <- list(aGVGD_A[[2]])
+  fit_ <- fit_A
+}
+```
+
+## Simulation summary
+Extract the posterior information of the parameters.
+```{r}
+df_ <- NULL
+df_eta <- NULL
+df_mu <- NULL
+df_mu1 <- NULL
+df_bet <- NULL
+df_tau <- NULL
+df_kappa <- NULL
+df_lambda <- NULL
+df_psi <- NULL
+df_sigma <- NULL
+df_p <- NULL
+df_pp <- NULL
+for(i in 1:Drug_No){
+  df_eta <- c(df_eta,list(subset(summary(fit_[[i]])$summary, grepl("eta_",
+              rownames(summary(fit_[[i]])$summary)))))
+  df_mu <- c(df_mu,list(subset(summary(fit_[[i]])$summary, grepl("mu_",
+              rownames(summary(fit_[[i]])$summary)))))
+  df_mu1 <- c(df_mu1,list(subset(summary(fit_[[i]])$summary, grepl("mu1_",
+              rownames(summary(fit_[[i]])$summary)))))
+  df_bet <- c(df_bet,list(subset(summary(fit_[[i]])$summary, grepl("bet",
+              rownames(summary(fit_[[i]])$summary)))))
+  df_tau <- c(df_tau,list(subset(summary(fit_[[i]])$summary, grepl("tau",
+              rownames(summary(fit_[[i]])$summary)))))
+  df_kappa <- c(df_kappa,list(subset(summary(fit_[[i]])$summary, grepl("kappa", 
+              rownames(summary(fit_[[i]])$summary)))))
+  df_lambda <- c(df_lambda,list(subset(summary(fit_[[i]])$summary, grepl("lambda",
+              rownames(summary(fit_[[i]])$summary)))))
+  df_psi <- c(df_psi,list(subset(summary(fit_[[i]])$summary, grepl("psi", 
+              rownames(summary(fit_[[i]])$summary)))))
+  df_sigma <- c(df_sigma,list(subset(summary(fit_[[i]])$summary, grepl("sigma", 
+              rownames(summary(fit_[[i]])$summary)))))
+  df_p <- c(df_p,list(subset(summary(fit_[[i]])$summary, grepl("p_y", 
+              rownames(summary(fit_[[i]])$summary)))))
+  df_ <- (rbind(df_mu[[i]],df_bet[[i]],df_kappa[[i]],df_lambda[[i]],
+                df_psi[[i]],df_sigma[[i]],df_eta[[i]],df_p[[i]]))
+  filename <- paste(Drug[[i]], '.txt', sep='')
+  write.table(data.frame(df_), file=filename, sep='\t',
+            quote=FALSE, col.names=NA)
+}
+```
+
+Graphical summary of HMC simulation
+```{r, eval=FALSE}
+
+ggs_ <- NULL
+for(i in 1:Drug_No){
+  ggs_ <- c(ggs_, list(ggs(fit_[[i]])))
+  filename <- paste(Drug[[i]], '-ggmcmc_density.pdf', sep='')
+  ggmcmc(ggs_[[i]], file=filename, plot=c('density'))
+  filename <- paste(Drug[[i]], '-ggmcmc_trace.pdf', sep='')
+  ggmcmc(ggs_[[i]], file=filename, plot=c('traceplot'))
+  filename <- paste(Drug[[i]], '-ggmcmc_running.pdf', sep='')
+  ggmcmc(ggs_[[i]], file=filename, plot=c('running'))
+  filename <- paste(Drug[[i]], '-ggmcmc_caterpillar.pdf', sep='')
+  ggmcmc(ggs_[[i]], file=filename, plot=c('caterpillar'))
+}
+```
+
+
+## Diagnostic figures
+Reorder by position or functional score as you want.
+```{r}
+est_ <- NULL
+for(i in 1:Drug_No){
+  len <- length(v_list[[i]])
+  eta <- NULL
+  eta$IARC <- as.factor(IARC[i][[1]])
+  eta$aGVGD <- as.factor(aGVGD[i][[1]])
+  eta$Iclass <- as.factor(Iclass[i][[1]])
+  eta$ave <- df_eta[[i]][1:len]
+  eta$pi <- df_pp[[i]][seq(1,(len*2-1),2)]
+  eta$le95 <- df_eta[[i]][(len*3+1):(len*4)]
+  eta$ue95 <- df_eta[[i]][(len*7+1):(len*8)]
+  eta$patho <- df_p[[i]][seq(1,(len*2-1),2)]
+  eta$ben <- df_p[[i]][seq(2,(len*2),2)]
+  eta$BF <- eta$patho/eta$ben
+  eta$name <- v_list[[i]]
+  eta$position <- position[[i]]
+  
+  for(j in 1:len){
+    if(eta$position[j] == 485)
+      eta$position[j] <- 3502
+    if(eta$position[j] == 997)
+      eta$position[j] <- 3503
+    if(eta$position[j] == 1502)
+      eta$position[j] <- 3504
+    if(eta$position[j] == 1984)
+      eta$position[j] <- 3505
+    if(eta$position[j] == 2535)
+      eta$position[j] <- 3506
+  }
+  eta$MANO_diagnosis[which(eta$BF<31.2)] <- "fClass 3"
+  eta$MANO_diagnosis[which(eta$BF<=0.032)] <- "fClass 2"
+  eta$MANO_diagnosis[which(eta$BF<=0.01)] <- "fClass 1"
+  eta$MANO_diagnosis[which(eta$BF>=31.2)] <- "fClass 4"
+  eta$MANO_diagnosis[which(eta$BF>=100)] <- "fClass 5"
+
+  est_ <- c(est_, list(eta))
+  fact_IARC <- factor(eta$IARC, 
+              levels = c("Class 1/2","Class 3","Class 4/5"))
+  fact_MANO <- factor(eta$MANO_diagnosis, 
+              levels = c("fClass 1","fClass 2","fClass 3",
+                         "fClass 4","fClass 5"))
+  
+  Colors <- c("dodgerblue", "orange", "firebrick2")
+  Colors2 <- c("greenyellow", "springgreen", "springgreen3", "palegreen4","black")
+  Shape <- c(21, 22, 23, 24, 25)
+
+  g_eta <- data.frame(eta, IARC=fact_IARC, MANO=fact_MANO)
+
+  g <- ggplot(g_eta, aes(x=reorder(name,position),  #sort by position
+# g <- ggplot(g_eta, aes(x=reorder(name,-ave),      #sort by eta value
+        y=ave, ymin=le95,  ymax=ue95, order=position,
+        colour=IARC, fill=MANO, shape=MANO))
+
+  g <- g + theme_classic()
+  g <- g + geom_pointrange()
+  g <- g + geom_point(size = 2.5)
+  g <- g + scale_shape_manual(values = Shape)
+  g <- g + theme(axis.text.x = element_blank(), panel.background = element_rect(fill="white"))
+  g <- g + xlab("")
+  g <- g + ylab(expression("Model-based functional estimation; "*eta))
+  g <- g + geom_hline(yintercept=(df_mu[[i]][1]),linetype="dashed",colour="red") 
+  g <- g + geom_hline(yintercept=(df_mu[[i]][2]),linetype="dashed",colour="green") 
+  g <- g + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  g <- g + ggtitle(paste("Estimated variant-specific effects",
+          "and classification; ",Drug[[i]]))
+  g <- g + theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+  g <- g + scale_color_manual(values = Colors)
+  g <- g + scale_fill_manual(values = Colors2)
+  plot(g)
+  filename <- paste('BF-', Drug[[i]], '.txt', sep='')
+  write.table(g_eta, file=filename, sep='\t',
+            quote=FALSE, col.names=NA)
+}
+```
+
+# Posterior Predictive Checks
+
+## Sampling from posterior distributions
+Draw 512 parameter samples from the trace randomly, then generate 612 random values per variant from a normal distribution, taking batch-to-batch ratio into account. 
+```{r}
+repN <- 512
+predY <- NULL
+for(i in 1:Drug_No){
+  BN <- max(d_[[i]]$batch)
+  BN_ <- NULL
+  for(j in 1:BN){
+    BN_ <- c(BN_,length(subset(d_[[i]], batch == j)$batch)/3)
+  }
+  NY <- length(v_list[[i]])
+  p_Y <- array(NA,c(repN, sum(BN_),NY))
+  d.ext<-rstan::extract(fit_[[i]])
+  for(k in 1:repN){
+    for(j in 1: NY){
+      tmp <- 0
+      for(l in 1: BN){
+        tmp = tmp + BN_[l]
+        p_Y[k,(tmp-BN_[l]+1):tmp,j] <- 
+        rnorm(BN_[l], d.ext$bet_[k,l] + d.ext$tau_[k,l]*d.ext$eta_[k,j],
+                           d.ext$tau_[k,l]*d.ext$psi_[k])
+      }
+    }
+  }
+  predY <- c(predY, list(p_Y))
+}
+```
+
+## Normal QQ plots of standardized residuals
+Quantile-quantile plots (QQ plots) for standardized residuals from our fit of the all observed data. When the residuals are assumed to be normally distributed, a normal QQ plot is used to check that assumption. Standardized residuals were averaged over posterior uncertainty in the model’s parameters. The green lines indicate a simultaneous 95% confidence intervals. If the model fit perfectly to the observed data, all plots are on the 45-degree reference line.
+```{r}
+for(i in 1:Drug_No){
+  y_obs <- d_[[i]]$score
+  len <- length(v_list[[i]])
+  y_ave <- rep(0,len)
+  y_sd <- rep(0,len)
+  y_res <- rep(0,len)
+  y_std_res <- rep(0,len)
+  for(j in 1:(length(d_[[i]]$var_name))){
+    y_ave[j] <- mean(predY[[i]][,,d_[[i]]$var_num[j]])
+  }
+  y_sd <- sd(y_ave[1:1836])
+  y_res <- y_obs - y_ave
+  y_std_res <- rep(0,len)
+  for(j in 1:(length(d_[[i]]$var_name))){
+      y_std_res[j] <- y_res[j] / y_sd
+  }
+  car::qqPlot(y_std_res, distribution="norm",
+              ylab=paste("Sample quantiles"),
+              xlab=paste("Theoretical quantiles"), 
+              main=paste("Normal QQ plot of expected standardized",
+                         "residuals; ", Drug[[i]]),
+              col.lines=carPalette()[7], 
+              envelope=.95, line="none",id=FALSE)
+  par(new=T)
+  car::qqPlot(y_std_res,distribution="norm",
+              ylab=paste("Sample quantiles"), 
+              xlab=paste("Theoretical quantiles"), 
+              main=paste("Normal QQ plot of expected standardized",
+                         "residuals; ", Drug[[i]]),
+              col.lines=carPalette()[2], 
+              envelope=FALSE, line="robust", id=FALSE)
+}
+```
+
+## Estimated density curves and observed data histograms
+Visual check the fit of predictive values to observed data using histogram and probability distribution line. A posterior predictive density curve of log-normalized relative viability data was computed from 612 generated data sets containing 512 samples each.
+```{r}
+for(i in 1:Drug_No){
+  m.pDat <- melt(predY[[i]],idvar=c())
+  fact_IARC <- factor(d_[[i]]$IARC_class,
+              levels = c("Class 3", "Class 1","Class 2",
+                         "Class 4","Class 5"))
+  m.Dat <- data.frame(d_[[i]]$score, fact_IARC)
+  colnames(m.Dat) <- c("value","IARC")
+  m.Dat <- melt(m.Dat)
+  Colors <- c("gold1", "dodgerblue", "cyan4", "darkorange1","firebrick2")
+  g <- ggplot(m.Dat,aes(x=value))
+  g <- g + theme_classic()
+  g <- g + ggtitle(paste("Posterior predictive distribution curve",
+                         "and observed data histogram; ", Drug[[i]]))
+  g <- g + xlab("Log-normalized relative viability") + ylab("Count")
+  g <- g + geom_histogram(data=m.Dat,aes(y=..count..,fill=IARC),
+        alpha=0.8, position = "stack",colour="black", binwidth = 0.2)
+  g <- g + geom_line(data=m.pDat,aes(x=value,y=..density..*NY),
+        alpha=0.8,stat="density",col ="red")
+  g <- g + scale_color_manual(values = Colors)
+  g <- g + scale_fill_manual(values = Colors)
+  plot(g)
+}
+```
+
+
+
+# Digital droplet PCR
+Histograms of the copy numbers of integrated BRCA2 cDNA.
+```{r}
+RT <- read.csv(file = "RT-PCR.csv")
+Colors <- c("dodgerblue")
+g <- ggplot(RT, aes(x = reorder(x = variant, X = No), y = copy, fill = "grey40"))
+g <- g + geom_bar(stat = "identity")
+g <- g + geom_errorbar(aes(ymin = copy_95max, ymax = copy_95min, width = 0.3))
+g <- g + theme_classic()
+g <- g + theme(legend.position = 'none')
+g <- g + theme(axis.text.x=element_text(angle = 90))
+g <- g + xlab("BRCA2 variant induced into DLD1 BRCA2 (-/-) cells")
+g <- g + ylab("BRCA2 copy number")
+g <- g + scale_y_continuous(expand=c(0,0))
+g <- g + scale_color_manual(values = Colors)
+g <- g + scale_fill_manual(values = Colors)
+plot(g) 
+```
+
+
+# Real time quantitative RT-PCR
+The Kruskal–Wallis one-way analysis of the variance of mRNA expression level. Error bars: standard deviation.
+```{r}
+g <- ggplot(RT, aes(x = reorder(x = variant, X = No), y = average, fill = "grey40"))
+g <- g + geom_bar(stat = "identity")
+g <- g + geom_errorbar(aes(ymin = average - std, ymax = average + std, width = 0.3))
+g <- g + theme_classic()
+g <- g + theme(legend.position = 'none')
+g <- g + theme(axis.text.x=element_text(angle = 90))
+g <- g + xlab("BRCA2 variant induced into DLD1 BRCA2 (-/-) cells")
+g <- g + ylab("BRCA2 mRNA expression level")
+g <- g + scale_y_continuous(expand=c(0,0))
+g <- g + scale_color_manual(values = Colors)
+g <- g + scale_fill_manual(values = Colors)
+plot(g)
+
+Anov_ <- melt(data.frame(head(RT[2:5],20)), variable_name = "variant")
+shapiro.test(x=Anov_$value)
+val_=Anov_$value
+var_=Anov_$variant
+res <-  kruskal.test(val_~var_)
+res
+```
+
+
+# Session information
+```{r}
+sessionInfo()
+```
