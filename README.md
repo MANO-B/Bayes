@@ -3,7 +3,7 @@ This repository contains all the code and data to regenerate results from our pa
 "High-Throughput Functional Evaluation of BRCA2 Variants of Unknown Significance"
 
 # Supplementary Code
-> M. Ikegami et al., "High-Throughput Functional Evaluation of BRCA2 Variants of Unknown Significance", in submission. 
+> M. Ikegami et al., "High-Throughput Functional Evaluation of BRCA2 Variants of Unknown Significance", Nat Commun 11, 2573 (2020). https://doi.org/10.1038/s41467-020-16141-8
 
 ## Contents
 
